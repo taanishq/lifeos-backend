@@ -23,10 +23,9 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // ── Model fallback chain ───────────────────────────────────────────
 const MODELS = [
+  "gemini-3.1-flash-lite",
   "gemini-2.5-flash",
   "gemini-3.5-flash",
-  "gemini-3.1-flash-lite",
-  "gemini-2.5-flash-lite-preview-06-17",
 ];
 
 async function generateWithFallback(prompt, parts = null) {
