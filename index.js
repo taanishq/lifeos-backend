@@ -41,7 +41,6 @@ async function generateWithFallback(prompt, parts = null) {
     } catch (err) {
       console.warn(`⚠️ Model ${modelName} failed: ${err.message}`);
       lastError = err;
-      // Only fallback on quota/rate limit errors
       if (!err.message.includes("429") && !err.message.includes("quota") && !err.message.includes("rate") && !err.message.includes("not found") && !err.message.includes("404")) {
         throw err;
       }
@@ -59,29 +58,23 @@ app.get("/", (req, res) => {
 app.post("/api/verify-goal", async (req, res) => {
   const { goal, proof, imageBase64, imageMimeType } = req.body;
   if (!goal) return res.status(400).json({ error: "goal is required" });
-
   try {
     const prompt = `I set a goal: "${goal}".
 ${proof ? `My written proof: "${proof}"` : ""}
 ${imageBase64 ? "I have also uploaded an image as proof (see attached)." : ""}
-
 Analyze the evidence and respond ONLY with a valid JSON object with these exact keys:
 - "status": one of "Verified", "Likely Completed", or "Insufficient Evidence"
-- "feedback": 1-2 sentences of constructive feedback referencing what you saw
-
+- "feedback": 1-2 sentences of constructive feedback
 No markdown, no code blocks, just raw JSON.`;
-
     let parts = [{ text: prompt }];
     if (imageBase64 && imageMimeType) {
       parts.push({ inlineData: { mimeType: imageMimeType, data: imageBase64 } });
     }
-
     const text = await generateWithFallback(prompt, imageBase64 ? parts : null);
-    const clean = text.replace(/```json|```/g, "").trim();
-    res.json(JSON.parse(clean));
+    res.json(JSON.parse(text.replace(/```json|```/g, "").trim()));
   } catch (err) {
     console.error("verify-goal error:", err.message);
-    res.status(500).json({ status: "Insufficient Evidence", feedback: "Could not verify at this time. Please try again later." });
+    res.status(500).json({ status: "Insufficient Evidence", feedback: "Could not verify at this time." });
   }
 });
 
@@ -89,7 +82,6 @@ No markdown, no code blocks, just raw JSON.`;
 app.post("/api/analyze-nutrition", async (req, res) => {
   const { foods } = req.body;
   if (!foods) return res.status(400).json({ error: "foods is required" });
-
   try {
     const prompt = `Estimate the nutritional content for this meal: "${foods}".
 Respond ONLY with a valid JSON object with these exact keys (all numbers):
@@ -98,10 +90,8 @@ Respond ONLY with a valid JSON object with these exact keys (all numbers):
 - "carbs": grams of carbohydrates
 - "fat": grams of fat
 Be realistic. No markdown, no code blocks, just raw JSON.`;
-
     const text = await generateWithFallback(prompt);
-    const clean = text.replace(/```json|```/g, "").trim();
-    res.json(JSON.parse(clean));
+    res.json(JSON.parse(text.replace(/```json|```/g, "").trim()));
   } catch (err) {
     console.error("analyze-nutrition error:", err.message);
     res.status(500).json({ error: "All AI models are currently busy. Please try again in a minute." });
@@ -112,20 +102,13 @@ Be realistic. No markdown, no code blocks, just raw JSON.`;
 app.post("/api/journal-summary", async (req, res) => {
   const { entries } = req.body;
   if (!entries || !entries.length) return res.status(400).json({ error: "entries are required" });
-
   try {
     const formatted = entries.map(e =>
       `Date: ${e.date}\nWent well: ${e.wentWell}\nCould improve: ${e.couldBeBetter}\nLearned: ${e.learned}\nGrateful: ${e.grateful}`
     ).join("\n---\n");
-
     const prompt = `Based on these recent journal entries, write a concise weekly reflection summary (3-4 sentences).
 Cover: patterns you notice, areas of growth, and one encouraging insight. Be warm and personal.
-
-Entries:
-${formatted}
-
-Respond with plain text only, no formatting.`;
-
+Entries:\n${formatted}\nRespond with plain text only, no formatting.`;
     const text = await generateWithFallback(prompt);
     res.json({ summary: text.trim() });
   } catch (err) {
@@ -137,7 +120,6 @@ Respond with plain text only, no formatting.`;
 // ── Daily Summary ──────────────────────────────────────────────────
 app.post("/api/daily-summary", async (req, res) => {
   const { goals, calories, protein, workout, spending } = req.body;
-
   try {
     const prompt = `Generate a brief, motivating daily summary (3-4 sentences) based on this data:
 - Goals completed: ${goals.completed} out of ${goals.total}
@@ -145,9 +127,7 @@ app.post("/api/daily-summary", async (req, res) => {
 - Protein: ${protein.current}g (target: ${protein.target}g)
 - Workout: ${workout || "Rest day"}
 - Money spent today: $${spending}
-
 Be encouraging, specific, and point out one thing to improve tomorrow. Plain text only.`;
-
     const text = await generateWithFallback(prompt);
     res.json({ summary: text.trim() });
   } catch (err) {
@@ -160,10 +140,8 @@ Be encouraging, specific, and point out one thing to improve tomorrow. Plain tex
 app.post("/api/import-csv", async (req, res) => {
   const { csvText } = req.body;
   if (!csvText) return res.status(400).json({ error: "csvText is required" });
-
   try {
     const prompt = `You are a financial data parser. Parse this bank/credit card statement and extract all purchase transactions.
-
 The file may be comma-separated OR tab-separated. Handle both formats.
 Common column names: "Trans. Date", "Transaction Date", "Date", "Post Date", "Description", "Amount", "Category"
 
@@ -173,33 +151,57 @@ ${csvText.slice(0, 10000)}
 Rules:
 - SKIP any row where amount is negative (those are payments or credits)
 - SKIP rows with descriptions like "PAYMENT", "THANK YOU", "CREDIT", "REFUND", "TRANSFER"
-- Clean up messy merchant names (e.g. "GIANT 6088 MIDDLETOWN PAAPPLE PAY ENDING IN 6509" becomes "Giant Food")
+- Clean up messy merchant names
 - Convert all dates to YYYY-MM-DD format
 - Amount must be a positive number
 
 Map each transaction to ONE category from this exact list:
 Groceries, Food & Dining, Restaurants, Fast Food, Coffee Shops, DoorDash, Uber Eats, Amazon, Clothes & Shoes, Transportation, Entertainment, Subscriptions, Rent, Travel, Other
 
-Respond ONLY with a valid JSON array. Each item must have exactly these keys:
+Respond ONLY with a valid JSON array. Each item must have:
 - "date": string in YYYY-MM-DD format
 - "description": clean short merchant name
 - "amount": positive number
 - "category": one category from the list above
 
-No markdown, no code blocks, no explanation. Just the raw JSON array starting with [ and ending with ].`;
-
+No markdown, no code blocks. Just the raw JSON array starting with [ and ending with ].`;
     const text = await generateWithFallback(prompt);
     const clean = text.replace(/```json|```/g, "").trim();
     const start = clean.indexOf("[");
     const end = clean.lastIndexOf("]") + 1;
-    if (start === -1 || end === 0) {
-      return res.status(500).json({ error: "Could not parse transactions from CSV" });
-    }
-    const parsed = JSON.parse(clean.slice(start, end));
-    res.json({ transactions: parsed });
+    if (start === -1 || end === 0) return res.status(500).json({ error: "Could not parse transactions from CSV" });
+    res.json({ transactions: JSON.parse(clean.slice(start, end)) });
   } catch (err) {
     console.error("import-csv error:", err.message);
     res.status(500).json({ error: "Could not parse CSV. Please try again." });
+  }
+});
+
+// ── Parse Application Email ────────────────────────────────────────
+app.post("/api/parse-application", async (req, res) => {
+  const { emailText } = req.body;
+  if (!emailText) return res.status(400).json({ error: "emailText is required" });
+  try {
+    const today = new Date().toISOString().split("T")[0];
+    const prompt = `Extract job application details from this email confirmation text.
+
+EMAIL:
+${emailText.slice(0, 3000)}
+
+Respond ONLY with a valid JSON object with these exact keys:
+- "company": company name (e.g. "Tesla", "Goldman Sachs")
+- "role": job title (e.g. "Accounting & Finance Intern")
+- "location": location if mentioned, otherwise ""
+- "dateApplied": "${today}"
+- "status": "Applied"
+- "notes": any useful info like position ID, department, deadline, otherwise ""
+
+No markdown, no code blocks, just raw JSON.`;
+    const text = await generateWithFallback(prompt);
+    res.json(JSON.parse(text.replace(/```json|```/g, "").trim()));
+  } catch (err) {
+    console.error("parse-application error:", err.message);
+    res.status(500).json({ error: "Could not parse email. Please try again." });
   }
 });
 
