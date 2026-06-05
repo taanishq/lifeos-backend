@@ -21,18 +21,46 @@ app.use(express.json({ limit: "20mb" }));
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
+// ── Model fallback chain ───────────────────────────────────────────
+const MODELS = [
+  "gemini-3.5-flash",
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite-preview-06-17",
+  "gemini-3.1-flash-lite",
+];
+
+async function generateWithFallback(prompt, parts = null) {
+  let lastError;
+  for (const modelName of MODELS) {
+    try {
+      const model = genAI.getGenerativeModel({ model: modelName });
+      const input = parts || prompt;
+      const result = await model.generateContent(input);
+      console.log(`✅ Used model: ${modelName}`);
+      return result.response.text();
+    } catch (err) {
+      console.warn(`⚠️ Model ${modelName} failed: ${err.message}`);
+      lastError = err;
+      // Only fallback on quota/rate limit errors
+      if (!err.message.includes("429") && !err.message.includes("quota") && !err.message.includes("rate") && !err.message.includes("not found") && !err.message.includes("404")) {
+        throw err;
+      }
+    }
+  }
+  throw lastError;
+}
+
+// ── Health check ───────────────────────────────────────────────────
 app.get("/", (req, res) => {
-  res.json({ status: "LifeOS backend running", ai: "Gemini" });
+  res.json({ status: "LifeOS backend running", ai: "Gemini (with fallback)" });
 });
 
-// ── Goal Verification (text + optional image) ──────────────────────
+// ── Goal Verification ──────────────────────────────────────────────
 app.post("/api/verify-goal", async (req, res) => {
   const { goal, proof, imageBase64, imageMimeType } = req.body;
   if (!goal) return res.status(400).json({ error: "goal is required" });
 
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
-
     const prompt = `I set a goal: "${goal}".
 ${proof ? `My written proof: "${proof}"` : ""}
 ${imageBase64 ? "I have also uploaded an image as proof (see attached)." : ""}
@@ -44,23 +72,16 @@ Analyze the evidence and respond ONLY with a valid JSON object with these exact 
 No markdown, no code blocks, just raw JSON.`;
 
     let parts = [{ text: prompt }];
-
     if (imageBase64 && imageMimeType) {
-      parts.push({
-        inlineData: {
-          mimeType: imageMimeType,
-          data: imageBase64,
-        },
-      });
+      parts.push({ inlineData: { mimeType: imageMimeType, data: imageBase64 } });
     }
 
-    const result = await model.generateContent(parts);
-    const text = result.response.text().replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(text);
-    res.json(parsed);
+    const text = await generateWithFallback(prompt, imageBase64 ? parts : null);
+    const clean = text.replace(/```json|```/g, "").trim();
+    res.json(JSON.parse(clean));
   } catch (err) {
     console.error("verify-goal error:", err.message);
-    res.status(500).json({ status: "Insufficient Evidence", feedback: "Could not verify at this time. Please try again." });
+    res.status(500).json({ status: "Insufficient Evidence", feedback: "Could not verify at this time. Please try again later." });
   }
 });
 
@@ -70,23 +91,20 @@ app.post("/api/analyze-nutrition", async (req, res) => {
   if (!foods) return res.status(400).json({ error: "foods is required" });
 
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
     const prompt = `Estimate the nutritional content for this meal: "${foods}".
 Respond ONLY with a valid JSON object with these exact keys (all numbers):
 - "calories": total calories
 - "protein": grams of protein
 - "carbs": grams of carbohydrates
 - "fat": grams of fat
-
 Be realistic. No markdown, no code blocks, just raw JSON.`;
 
-    const result = await model.generateContent(prompt);
-    const text = result.response.text().replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(text);
-    res.json(parsed);
+    const text = await generateWithFallback(prompt);
+    const clean = text.replace(/```json|```/g, "").trim();
+    res.json(JSON.parse(clean));
   } catch (err) {
     console.error("analyze-nutrition error:", err.message);
-    res.status(500).json({ error: "Could not analyze nutrition. Please try again." });
+    res.status(500).json({ error: "All AI models are currently busy. Please try again in a minute." });
   }
 });
 
@@ -96,7 +114,6 @@ app.post("/api/journal-summary", async (req, res) => {
   if (!entries || !entries.length) return res.status(400).json({ error: "entries are required" });
 
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
     const formatted = entries.map(e =>
       `Date: ${e.date}\nWent well: ${e.wentWell}\nCould improve: ${e.couldBeBetter}\nLearned: ${e.learned}\nGrateful: ${e.grateful}`
     ).join("\n---\n");
@@ -109,11 +126,11 @@ ${formatted}
 
 Respond with plain text only, no formatting.`;
 
-    const result = await model.generateContent(prompt);
-    res.json({ summary: result.response.text().trim() });
+    const text = await generateWithFallback(prompt);
+    res.json({ summary: text.trim() });
   } catch (err) {
     console.error("journal-summary error:", err.message);
-    res.status(500).json({ error: "Could not generate summary. Please try again." });
+    res.status(500).json({ error: "All AI models are currently busy. Please try again in a minute." });
   }
 });
 
@@ -122,7 +139,6 @@ app.post("/api/daily-summary", async (req, res) => {
   const { goals, calories, protein, workout, spending } = req.body;
 
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
     const prompt = `Generate a brief, motivating daily summary (3-4 sentences) based on this data:
 - Goals completed: ${goals.completed} out of ${goals.total}
 - Calories consumed: ${calories.current} (target: ${calories.target})
@@ -132,16 +148,12 @@ app.post("/api/daily-summary", async (req, res) => {
 
 Be encouraging, specific, and point out one thing to improve tomorrow. Plain text only.`;
 
-    const result = await model.generateContent(prompt);
-    res.json({ summary: result.response.text().trim() });
+    const text = await generateWithFallback(prompt);
+    res.json({ summary: text.trim() });
   } catch (err) {
     console.error("daily-summary error:", err.message);
     res.status(500).json({ error: "Could not generate summary." });
   }
-});
-
-app.listen(PORT, () => {
-  console.log(`✅ LifeOS backend running on http://localhost:${PORT}`);
 });
 
 // ── CSV Transaction Import ─────────────────────────────────────────
@@ -150,42 +162,47 @@ app.post("/api/import-csv", async (req, res) => {
   if (!csvText) return res.status(400).json({ error: "csvText is required" });
 
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
+    const prompt = `You are a financial data parser. Parse this bank/credit card statement and extract all purchase transactions.
 
-    const prompt = `You are a financial data parser. Parse this CSV bank/credit card statement and extract all transactions.
+The file may be comma-separated OR tab-separated. Handle both formats.
+Common column names: "Trans. Date", "Transaction Date", "Date", "Post Date", "Description", "Amount", "Category"
 
-CSV DATA:
-${csvText.slice(0, 8000)}
+STATEMENT DATA:
+${csvText.slice(0, 10000)}
 
-For each transaction, determine the best category from this exact list:
+Rules:
+- SKIP any row where amount is negative (those are payments or credits)
+- SKIP rows with descriptions like "PAYMENT", "THANK YOU", "CREDIT", "REFUND", "TRANSFER"
+- Clean up messy merchant names (e.g. "GIANT 6088 MIDDLETOWN PAAPPLE PAY ENDING IN 6509" becomes "Giant Food")
+- Convert all dates to YYYY-MM-DD format
+- Amount must be a positive number
+
+Map each transaction to ONE category from this exact list:
 Groceries, Food & Dining, Restaurants, Fast Food, Coffee Shops, DoorDash, Uber Eats, Amazon, Clothes & Shoes, Transportation, Entertainment, Subscriptions, Rent, Travel, Other
 
-Respond ONLY with a valid JSON array. Each item must have:
-- "date": date in YYYY-MM-DD format
-- "description": merchant/description (keep it short, clean)
-- "amount": positive number (absolute value, no negatives)
-- "category": one from the list above
+Respond ONLY with a valid JSON array. Each item must have exactly these keys:
+- "date": string in YYYY-MM-DD format
+- "description": clean short merchant name
+- "amount": positive number
+- "category": one category from the list above
 
-Example format:
-[{"date":"2024-01-15","description":"Whole Foods","amount":45.23,"category":"Groceries"}]
+No markdown, no code blocks, no explanation. Just the raw JSON array starting with [ and ending with ].`;
 
-Only include actual purchase transactions. Skip payments, credits, refunds, and transfers.
-No markdown, no code blocks, just the raw JSON array.`;
-
-    const result = await model.generateContent(prompt);
-    const text = result.response.text().replace(/```json|```/g, "").trim();
-
-    // Find the JSON array in the response
-    const start = text.indexOf("[");
-    const end = text.lastIndexOf("]") + 1;
+    const text = await generateWithFallback(prompt);
+    const clean = text.replace(/```json|```/g, "").trim();
+    const start = clean.indexOf("[");
+    const end = clean.lastIndexOf("]") + 1;
     if (start === -1 || end === 0) {
       return res.status(500).json({ error: "Could not parse transactions from CSV" });
     }
-
-    const parsed = JSON.parse(text.slice(start, end));
+    const parsed = JSON.parse(clean.slice(start, end));
     res.json({ transactions: parsed });
   } catch (err) {
     console.error("import-csv error:", err.message);
     res.status(500).json({ error: "Could not parse CSV. Please try again." });
   }
+});
+
+app.listen(PORT, () => {
+  console.log(`✅ LifeOS backend running on http://localhost:${PORT}`);
 });
