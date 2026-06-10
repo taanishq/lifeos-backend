@@ -203,6 +203,144 @@ No markdown, no code blocks, just raw JSON.`;
     res.status(500).json({ error: "Could not parse email. Please try again." });
   }
 });
+// ── Spotify Auth ───────────────────────────────────────────────────
+app.get("/api/spotify/login", (req, res) => {
+  const scopes = [
+    "user-read-currently-playing",
+    "user-read-playback-state",
+    "user-modify-playback-state",
+    "user-read-recently-played",
+  ].join(" ");
+
+  const params = new URLSearchParams({
+    response_type: "code",
+    client_id: process.env.SPOTIFY_CLIENT_ID,
+    scope: scopes,
+    redirect_uri: process.env.SPOTIFY_REDIRECT_URI,
+  });
+
+  res.redirect(`https://accounts.spotify.com/authorize?${params}`);
+});
+
+app.get("/api/spotify/callback", async (req, res) => {
+  const code = req.query.code;
+  if (!code) return res.status(400).json({ error: "No code provided" });
+
+  try {
+    const response = await fetch("https://accounts.spotify.com/api/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Authorization": "Basic " + Buffer.from(
+          `${process.env.SPOTIFY_CLIENT_ID}:${process.env.SPOTIFY_CLIENT_SECRET}`
+        ).toString("base64"),
+      },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: process.env.SPOTIFY_REDIRECT_URI,
+      }),
+    });
+
+    const data = await response.json();
+    if (data.error) throw new Error(data.error);
+
+    // Redirect back to frontend with tokens
+    const params = new URLSearchParams({
+      access_token: data.access_token,
+      refresh_token: data.refresh_token,
+      expires_in: data.expires_in,
+    });
+
+    res.redirect(`https://lifeos-mu-nine.vercel.app/callback?${params}`);
+  } catch (err) {
+    console.error("Spotify callback error:", err.message);
+    res.redirect(`https://lifeos-mu-nine.vercel.app/callback?error=auth_failed`);
+  }
+});
+
+app.post("/api/spotify/refresh", async (req, res) => {
+  const { refresh_token } = req.body;
+  if (!refresh_token) return res.status(400).json({ error: "No refresh token" });
+
+  try {
+    const response = await fetch("https://accounts.spotify.com/api/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Authorization": "Basic " + Buffer.from(
+          `${process.env.SPOTIFY_CLIENT_ID}:${process.env.SPOTIFY_CLIENT_SECRET}`
+        ).toString("base64"),
+      },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token,
+      }),
+    });
+
+    const data = await response.json();
+    res.json({ access_token: data.access_token, expires_in: data.expires_in });
+  } catch (err) {
+    console.error("Spotify refresh error:", err.message);
+    res.status(500).json({ error: "Could not refresh token" });
+  }
+});
+
+app.get("/api/spotify/now-playing", async (req, res) => {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "No token" });
+
+  try {
+    const response = await fetch("https://api.spotify.com/v1/me/player/currently-playing", {
+      headers: { "Authorization": `Bearer ${token}` },
+    });
+
+    if (response.status === 204) return res.json({ isPlaying: false });
+
+    const data = await response.json();
+    if (!data.item) return res.json({ isPlaying: false });
+
+    res.json({
+      isPlaying: data.is_playing,
+      title: data.item.name,
+      artist: data.item.artists.map(a => a.name).join(", "),
+      album: data.item.album.name,
+      albumArt: data.item.album.images[0]?.url,
+      duration: data.item.duration_ms,
+      progress: data.progress_ms,
+      trackUrl: data.item.external_urls.spotify,
+    });
+  } catch (err) {
+    console.error("Now playing error:", err.message);
+    res.status(500).json({ error: "Could not fetch now playing" });
+  }
+});
+
+app.post("/api/spotify/control", async (req, res) => {
+  const token = req.headers.authorization?.split(" ")[1];
+  const { action } = req.body;
+  if (!token) return res.status(401).json({ error: "No token" });
+
+  const endpoints = {
+    play: { url: "https://api.spotify.com/v1/me/player/play", method: "PUT" },
+    pause: { url: "https://api.spotify.com/v1/me/player/pause", method: "PUT" },
+    next: { url: "https://api.spotify.com/v1/me/player/next", method: "POST" },
+    previous: { url: "https://api.spotify.com/v1/me/player/previous", method: "POST" },
+  };
+
+  const endpoint = endpoints[action];
+  if (!endpoint) return res.status(400).json({ error: "Invalid action" });
+
+  try {
+    await fetch(endpoint.url, {
+      method: endpoint.method,
+      headers: { "Authorization": `Bearer ${token}` },
+    });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Control failed" });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`✅ LifeOS backend running on http://localhost:${PORT}`);
