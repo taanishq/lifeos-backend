@@ -342,6 +342,35 @@ app.post("/api/spotify/control", async (req, res) => {
   }
 });
 
+// ── Guitar AI Analysis ─────────────────────────────────────────────
+app.post("/api/analyze-guitar", async (req, res) => {
+  const { content, songTitle, artist } = req.body;
+  if (!content) return res.status(400).json({ error: "content is required" });
+  try {
+    const prompt = `You are an expert guitar coach. Analyze the following guitar content${songTitle ? ` for "${songTitle}"${artist ? ` by ${artist}` : ""}` : ""}.
+
+CONTENT:
+${content.slice(0, 4000)}
+
+Respond ONLY with a valid JSON object with these exact keys:
+- "difficulty": one of "Beginner", "Intermediate", "Advanced", "Expert"
+- "estimatedLearningTime": string like "2-3 weeks" or "1-2 months"
+- "challengingSections": array of strings describing hard parts
+- "chordTransitions": array of strings with specific transition advice
+- "fingerPositioning": array of strings with finger placement tips
+- "practiceRoutine": array of strings with daily practice suggestions (3-5 steps)
+- "simplifications": array of strings with ways to simplify if too hard
+- "summary": 2-3 sentence overview of the song/content from a guitar coach perspective
+
+No markdown, no code blocks, just raw JSON.`;
+    const text = await generateWithFallback(prompt);
+    res.json(JSON.parse(text.replace(/```json|```/g, "").trim()));
+  } catch (err) {
+    console.error("analyze-guitar error:", err.message);
+    res.status(500).json({ error: "Could not analyze. Please try again." });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`✅ LifeOS backend running on http://localhost:${PORT}`);
 });
